@@ -1,6 +1,5 @@
 use hidapi::{HidApi, HidDevice};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use zerocopy::*;
 
 mod util;
@@ -18,18 +17,43 @@ const DEVICE_TUPLES: [(u16, u16); 3] = [
 ];
 
 #[repr(u8)]
-enum ReportId {
-    SubcmdReply = 0x21,
-    IMU = 0x30,
-    MCU = 0x31,
+enum OutputReportID {
+    RumbleAndSubcommand = 0x01,
+    RumbleOnly = 0x10,
+    Proprietary = 0x80,
 }
 
-impl ReportId {
+#[repr(u8)]
+enum SubcommandID {
+    BluetoothManualPair = 0x01,
+    RequestDeviceInfo = 0x02,
+    SetInputReportMode = 0x03,
+    SetHCIState = 0x06,
+    SPIFlashRead = 0x10,
+    SetPlayerLights = 0x30,
+    SetHomeLight = 0x38,
+    EnableIMU = 0x40,
+    SetIMUSensitivity = 0x41,
+    EnableVibration = 0x48,
+}
+
+#[repr(u8)]
+enum InputReportID {
+    SubcommandReply = 0x21,
+    FullControllerState = 0x30,
+    FullControllerAndMcuState = 0x31,
+    SimpleControllerState = 0x3F,
+    CommandAck = 0x81,
+}
+
+impl InputReportID {
     fn try_from_u8(value: u8) -> Option<Self> {
         match value {
-            0x21 => Some(ReportId::SubcmdReply),
-            0x30 => Some(ReportId::IMU),
-            0x31 => Some(ReportId::MCU),
+            0x21 => Some(InputReportID::SubcommandReply),
+            0x30 => Some(InputReportID::FullControllerState),
+            0x31 => Some(InputReportID::FullControllerAndMcuState),
+            0x3F => Some(InputReportID::SimpleControllerState),
+            0x81 => Some(InputReportID::CommandAck),
             _ => None,
         }
     }
@@ -54,25 +78,45 @@ struct IMUData {
     gyro_z: i16,
 }
 
-enum SubData {
-    Reply(SubcmdReply),
-    IMU(IMUData),
+#[repr(C)]
+#[derive(FromBytes, FromZeroes, Default)]
+struct ControllerStatePacket {
+    counter: u8,
+    battery_and_connection: u8, /* battery and connection info */
+    button_status: [u8; 3],
+    left_stick: [u8; 3],
+    right_stick: [u8; 3],
+    vibration_code: u8,
 }
 
 #[repr(C)]
 #[derive(FromBytes, FromZeroes, Default)]
-struct JoyConReport {
-    id: u8,
-    timer: u8,
-    bat_con: u8, /* battery and connection info */
+struct SubcommandInputPacket {
+    controller_state: ControllerStatePacket,
+    subcommand_ack: u8,
+    subcommand_id: u8,
+    subcommand_data: [u8; 32],
+}
+
+#[repr(C)]
+#[derive(FromBytes, FromZeroes, Default)]
+struct SimpleControllerStatePacket {
     button_status: [u8; 3],
     left_stick: [u8; 3],
     right_stick: [u8; 3],
-    vibrator_report: u8,
-    sub_data: [u8; 18],
 }
 
-const REPORT_BUF_SIZE: usize = size_of::<JoyConReport>();
+struct JobConRequest {
+    subcmd_id: u8,
+    rumble_data: [u8; 8],
+    data: [u8; 0],
+}
+
+const REPORT_BUF_SIZE: usize = 48;
+
+fn to_axis(value: u32) -> f32 {
+    value as f32
+}
 
 #[derive(Debug, Default)]
 pub struct Gamepad {
@@ -103,17 +147,67 @@ impl GamepadAPI {
         }
     }
 
-    fn read_data_and_fill(buf: &mut [u8], device: &HidDevice, gamepad: &mut Gamepad) {
+    fn send_subcommand(device: &HidDevice, commandId: SubcommandID, buf: &[u8], len: usize) {
+        //
+    }
+
+    fn read_data_and_fill(device: &HidDevice, gamepad: &mut Gamepad, buf: &mut [u8]) {
         let len = device.read(buf).unwrap();
-        if len > 12 {
-            if let Some(report_id) = ReportId::try_from_u8(buf[0]) {
-                //const report = buf
-                let report = JoyConReport::read_from(buf).unwrap();
-                let button_values = util::extract_bits(&report.button_status, 3);
-                for i in 0..24 {
-                    gamepad.buttons[i].pressed = button_values[i] > 0;
-                    gamepad.buttons[i].value = button_values[i] as f32;
+
+        //println!("raw len: {}", len);
+
+        if len >= 12 {
+            let hex_string: String = buf.iter().map(|byte| format!("0x{:02x} ", byte)).collect();
+            //println!("raw: {}", hex_string);
+
+            match InputReportID::try_from_u8(buf[0]) {
+                Some(InputReportID::FullControllerState) => {
+                    let report = ControllerStatePacket::read_from_prefix(&buf[1..]).unwrap();
+                    let button_values = util::extract_bits(&report.button_status, 3);
+
+                    for i in 0..24 {
+                        gamepad.buttons[i].pressed = button_values[i] > 0;
+                        gamepad.buttons[i].value = button_values[i] as f32;
+                    }
+
+                    let left_x: u32 = ((report.left_stick[1] & 0x0F) as u32) << 4
+                        | (report.left_stick[1] as u32) >> 4;
+                    let left_y: u32 = report.left_stick[2] as u32;
+
+                    let right_x: u32 = ((report.right_stick[1] & 0x0F) as u32) << 4
+                        | (report.right_stick[1] as u32) >> 4;
+                    let right_y: u32 = report.right_stick[2] as u32;
+
+                    gamepad.axes[0] = to_axis(left_x);
+                    gamepad.axes[1] = to_axis(left_y);
+                    gamepad.axes[2] = to_axis(right_x);
+                    gamepad.axes[3] = to_axis(right_y);
                 }
+                Some(InputReportID::SimpleControllerState) => {
+                    let report = SimpleControllerStatePacket::read_from_prefix(&buf[1..]).unwrap();
+
+                    let button_values = util::extract_bits(&report.button_status, 3);
+                    for i in 0..24 {
+                        gamepad.buttons[i].pressed = button_values[i] > 0;
+                        gamepad.buttons[i].value = button_values[i] as f32;
+                    }
+
+                    let left_x: u32 =
+                        (report.left_stick[0] as u32) << 4 | (report.left_stick[1] as u32) >> 4;
+                    let left_y: u32 =
+                        ((report.left_stick[1] as u32) & 0x0F) << 8 | report.left_stick[2] as u32;
+
+                    let right_x: u32 =
+                        (report.right_stick[0] as u32) << 4 | (report.right_stick[1] as u32) >> 4;
+                    let right_y: u32 =
+                        ((report.right_stick[1] as u32) & 0x0F) << 8 | report.right_stick[2] as u32;
+
+                    gamepad.axes[0] = to_axis(left_x);
+                    gamepad.axes[1] = to_axis(left_y);
+                    gamepad.axes[2] = to_axis(right_x);
+                    gamepad.axes[3] = to_axis(right_y);
+                }
+                _ => {}
             }
         }
     }
@@ -151,7 +245,7 @@ impl GamepadAPI {
             let mut gamepad = Gamepad::default();
 
             gamepad.index = *index;
-            Self::read_data_and_fill(input_buf, &device, &mut gamepad);
+            Self::read_data_and_fill(&device, &mut gamepad, input_buf);
 
             gamepads.push(gamepad);
         }
@@ -163,50 +257,14 @@ impl GamepadAPI {
     }
 }
 
-// pub fn extract_bits(value: u8) -> [u8; 8] {
-//     let mut bits = [0u8; 8];
-//     for i in 0..8 {
-//         let mask = 1 << i;
-//         // Check if the bit is set and store 1 or 0 accordingly
-//         bits[i] = if (value & mask) != 0 { 1 } else { 0 };
-//     }
-//     bits
-// }
-
-fn main() {}
-
-// static int joycon_send_subcmd(struct joycon_ctlr *ctlr,
-// 			      struct joycon_subcmd_request *subcmd,
-// 			      size_t data_len, u32 timeout)
-// {
-// 	int ret;
-// 	unsigned long flags;
-
-// 	spin_lock_irqsave(&ctlr->lock, flags);
-// 	/*
-// 	 * If the controller has been removed, just return ENODEV so the LED
-// 	 * subsystem doesn't print invalid errors on removal.
-// 	 */
-// 	if (ctlr->ctlr_state == JOYCON_CTLR_STATE_REMOVED) {
-// 		spin_unlock_irqrestore(&ctlr->lock, flags);
-// 		return -ENODEV;
-// 	}
-// 	memcpy(subcmd->rumble_data, ctlr->rumble_data[ctlr->rumble_queue_tail],
-// 	       JC_RUMBLE_DATA_SIZE);
-// 	spin_unlock_irqrestore(&ctlr->lock, flags);
-
-// 	subcmd->output_id = JC_OUTPUT_RUMBLE_AND_SUBCMD;
-// 	subcmd->packet_num = ctlr->subcmd_num;
-// 	if (++ctlr->subcmd_num > 0xF)
-// 		ctlr->subcmd_num = 0;
-// 	ctlr->subcmd_ack_match = subcmd->subcmd_id;
-// 	ctlr->msg_type = JOYCON_MSG_TYPE_SUBCMD;
-
-// 	ret = joycon_hid_send_sync(ctlr, (u8 *)subcmd,
-// 				   sizeof(*subcmd) + data_len, timeout);
-// 	if (ret < 0)
-// 		hid_dbg(ctlr->hdev, "send subcommand failed; ret=%d\n", ret);
-// 	else
-// 		ret = 0;
-// 	return ret;
-// }
+fn main() {
+    let mut gamepad_api = GamepadAPI::new();
+    loop {
+        let gamepads = gamepad_api.get_gamepads();
+        for gamepad in gamepads {
+            println!("axis: {:?}", gamepad.axes);
+            println!("buttons: {:?}", &gamepad.buttons[0..4]);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
