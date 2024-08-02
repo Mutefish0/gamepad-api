@@ -2,6 +2,14 @@
   "files.associations": {
     "memory": "cpp",
     "__locale": "c",
-    "locale": "c"
+    "locale": "c",
+    "iosfwd": "c",
+    "vector": "c",
+    "__string": "c",
+    "string": "c",
+    "string_view": "c",
+    "bitset": "c",
+    "forward_list": "c",
+    "functional": "c"
   }
 }

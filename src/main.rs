@@ -1,4 +1,9 @@
+/**
+ * port form:
+ *  https://source.chromium.org/chromium/chromium/src/+/main:device/gamepad/nintendo_controller.cc;bpv=0;bpt=1
+ */
 use hidapi::{HidApi, HidDevice};
+use num_enum::TryFromPrimitive;
 use std::collections::{HashMap, HashSet};
 use zerocopy::*;
 
@@ -16,6 +21,14 @@ const DEVICE_TUPLES: [(u16, u16); 3] = [
     (VENDOR_ID_NINTENDO, PRODUCT_IDNINTENDO_PROCON),
 ];
 
+// Bogus calibration value that should be ignored.
+const CAL_BOGUS_VALUE: u16 = 0xfff;
+// Default calibration values to use if the controller returns bogus values.
+const CAL_DEFAULT_DEADZONE: u16 = 160;
+const CAL_DEFAULT_MIN: u16 = 550;
+const CAL_DEFAULT_CENTER: u16 = 2050;
+const CAL_DEFAULT_MAX: u16 = 3550;
+
 #[repr(u8)]
 enum OutputReportID {
     RumbleAndSubcommand = 0x01,
@@ -24,6 +37,7 @@ enum OutputReportID {
 }
 
 #[repr(u8)]
+#[derive(Debug, TryFromPrimitive)]
 enum SubcommandID {
     BluetoothManualPair = 0x01,
     RequestDeviceInfo = 0x02,
@@ -37,26 +51,28 @@ enum SubcommandID {
     EnableVibration = 0x48,
 }
 
+#[repr(u16)]
+#[derive(Debug, TryFromPrimitive)]
+enum SPIAddress {
+    // SPI memory regions.
+    ImuCalibration = 0x6020,
+    //const size_t kSpiImuCalibrationSize = 24;
+    AnalogStickCalibration = 0x603d,
+    //const size_t kSpiAnalogStickCalibrationSize = 18;
+    ImuHorizontalOffsets = 0x6080,
+    //const size_t kSpiImuHorizontalOffsetsSize = 6;
+    AnalogStickParameters = 0x6086,
+    //const size_t kSpiAnalogStickParametersSize = 18;
+}
+
 #[repr(u8)]
+#[derive(Debug, TryFromPrimitive)]
 enum InputReportID {
     SubcommandReply = 0x21,
     FullControllerState = 0x30,
     FullControllerAndMcuState = 0x31,
     SimpleControllerState = 0x3F,
     CommandAck = 0x81,
-}
-
-impl InputReportID {
-    fn try_from_u8(value: u8) -> Option<Self> {
-        match value {
-            0x21 => Some(InputReportID::SubcommandReply),
-            0x30 => Some(InputReportID::FullControllerState),
-            0x31 => Some(InputReportID::FullControllerAndMcuState),
-            0x3F => Some(InputReportID::SimpleControllerState),
-            0x81 => Some(InputReportID::CommandAck),
-            _ => None,
-        }
-    }
 }
 
 #[repr(C)]
@@ -80,12 +96,18 @@ struct IMUData {
 
 #[repr(C)]
 #[derive(FromBytes, FromZeroes, Default)]
-struct ControllerStatePacket {
-    counter: u8,
-    battery_and_connection: u8, /* battery and connection info */
+struct SimpleControllerStatePacket {
     button_status: [u8; 3],
     left_stick: [u8; 3],
     right_stick: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(FromBytes, FromZeroes, Default)]
+struct ControllerStatePacket {
+    counter: u8,
+    battery_and_connection: u8, /* battery and connection info */
+    simple_state: SimpleControllerStatePacket,
     vibration_code: u8,
 }
 
@@ -95,27 +117,109 @@ struct SubcommandInputPacket {
     controller_state: ControllerStatePacket,
     subcommand_ack: u8,
     subcommand_id: u8,
+    address: u16,
+    padding: [u8; 2], // 0x00 0x00
+    length: u8,
     subcommand_data: [u8; 32],
-}
-
-#[repr(C)]
-#[derive(FromBytes, FromZeroes, Default)]
-struct SimpleControllerStatePacket {
-    button_status: [u8; 3],
-    left_stick: [u8; 3],
-    right_stick: [u8; 3],
-}
-
-struct JobConRequest {
-    subcmd_id: u8,
-    rumble_data: [u8; 8],
-    data: [u8; 0],
 }
 
 const REPORT_BUF_SIZE: usize = 48;
 
-fn to_axis(value: u32) -> f32 {
-    value as f32
+#[repr(C)]
+#[derive(FromBytes, FromZeroes, Default)]
+struct AnalogStickCalibrationPacket {
+    // Analog stick calibration data.
+    l_xy_max: [u8; 3],
+    l_xy_center: [u8; 3],
+    l_xy_min: [u8; 3],
+
+    r_xy_center: [u8; 3],
+    r_xy_min: [u8; 3],
+    r_xy_max: [u8; 3],
+}
+#[repr(C)]
+#[derive(FromBytes, FromZeroes, Default)]
+struct AnalogStickParamsCalibrationPacket {
+    // Analog stick parameters
+    padding: [u8; 3],
+
+    // dead zone and range ratio
+    params: [u8; 3],
+}
+
+struct CalibrationData {
+    // Analog stick calibration data.
+    lx_center: u16,
+    lx_min: u16,
+    lx_max: u16,
+    ly_center: u16,
+    ly_min: u16,
+    ly_max: u16,
+    rx_center: u16,
+    rx_min: u16,
+    rx_max: u16,
+    ry_center: u16,
+    ry_min: u16,
+    ry_max: u16,
+
+    dead_zone: u16,
+    range_ratio: u16,
+
+    // IMU calibration data.
+    accelerometer_origin_x: u16,
+    accelerometer_origin_y: u16,
+    accelerometer_origin_z: u16,
+    accelerometer_sensitivity_x: u16,
+    accelerometer_sensitivity_y: u16,
+    accelerometer_sensitivity_z: u16,
+    gyro_origin_x: u16,
+    gyro_origin_y: u16,
+    gyro_origin_z: u16,
+    gyro_sensitivity_x: u16,
+    gyro_sensitivity_y: u16,
+    gyro_sensitivity_z: u16,
+    horizontal_offset_x: u16,
+    horizontal_offset_y: u16,
+    horizontal_offset_z: u16,
+}
+
+impl Default for CalibrationData {
+    fn default() -> Self {
+        CalibrationData {
+            lx_center: CAL_DEFAULT_CENTER,
+            lx_min: CAL_DEFAULT_MIN,
+            lx_max: CAL_DEFAULT_MAX,
+            ly_center: CAL_DEFAULT_CENTER,
+            ly_min: CAL_DEFAULT_MIN,
+            ly_max: CAL_DEFAULT_MAX,
+            rx_center: CAL_DEFAULT_CENTER,
+            rx_min: CAL_DEFAULT_MIN,
+            rx_max: CAL_DEFAULT_MAX,
+            ry_center: CAL_DEFAULT_CENTER,
+            ry_min: CAL_DEFAULT_MIN,
+            ry_max: CAL_DEFAULT_MAX,
+
+            dead_zone: CAL_DEFAULT_DEADZONE,
+            range_ratio: 0,
+
+            // IMU calibration data.
+            accelerometer_origin_x: 0,
+            accelerometer_origin_y: 0,
+            accelerometer_origin_z: 0,
+            accelerometer_sensitivity_x: 0,
+            accelerometer_sensitivity_y: 0,
+            accelerometer_sensitivity_z: 0,
+            gyro_origin_x: 0,
+            gyro_origin_y: 0,
+            gyro_origin_z: 0,
+            gyro_sensitivity_x: 0,
+            gyro_sensitivity_y: 0,
+            gyro_sensitivity_z: 0,
+            horizontal_offset_x: 0,
+            horizontal_offset_y: 0,
+            horizontal_offset_z: 0,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -133,7 +237,7 @@ pub struct Button {
 
 pub struct GamepadAPI {
     hidapi: HidApi,
-    device_map: HashMap<String, (usize, HidDevice)>,
+    device_map: HashMap<String, (usize, HidDevice, CalibrationData)>,
     input_buf: [u8; REPORT_BUF_SIZE],
 }
 
@@ -151,7 +255,131 @@ impl GamepadAPI {
         //
     }
 
-    fn read_data_and_fill(device: &HidDevice, gamepad: &mut Gamepad, buf: &mut [u8]) {
+    fn update_gamepad(
+        state: &SimpleControllerStatePacket,
+        cal_data: &CalibrationData,
+        gamepad: &mut Gamepad,
+    ) {
+        let button_values = util::extract_bits(&state.button_status, 3);
+        for i in 0..24 {
+            gamepad.buttons[i].pressed = button_values[i] > 0;
+            gamepad.buttons[i].value = button_values[i] as f32;
+        }
+
+        let mut lx: u16 = 0;
+        let mut ly: u16 = 0;
+        let mut rx: u16 = 0;
+        let mut ry: u16 = 0;
+
+        util::unpack_shorts(&state.left_stick, &mut lx, &mut ly);
+        util::unpack_shorts(&state.right_stick, &mut rx, &mut ry);
+
+        let is_left_deadzone = util::is_dead_zone(
+            lx,
+            ly,
+            cal_data.lx_center,
+            cal_data.ly_center,
+            cal_data.dead_zone,
+        );
+
+        let is_right_deadzone = util::is_dead_zone(
+            rx,
+            ry,
+            cal_data.rx_center,
+            cal_data.ry_center,
+            cal_data.dead_zone,
+        );
+
+        gamepad.axes[0] = if is_left_deadzone {
+            0.0
+        } else {
+            util::clamp_axis(lx, cal_data.lx_min, cal_data.lx_max)
+        };
+        gamepad.axes[1] = if is_left_deadzone {
+            0.0
+        } else {
+            util::clamp_axis(ly, cal_data.ly_min, cal_data.ly_max)
+        };
+        gamepad.axes[2] = if is_right_deadzone {
+            0.0
+        } else {
+            util::clamp_axis(rx, cal_data.rx_min, cal_data.rx_max)
+        };
+        gamepad.axes[3] = if is_right_deadzone {
+            0.0
+        } else {
+            util::clamp_axis(ry, cal_data.ry_min, cal_data.ry_max)
+        };
+    }
+
+    fn update_stick_calibration_data(
+        cal: &AnalogStickCalibrationPacket,
+        cal_data: &mut CalibrationData,
+    ) {
+        util::unpack_shorts(
+            &cal.l_xy_center,
+            &mut cal_data.lx_center,
+            &mut cal_data.ly_center,
+        );
+        util::unpack_shorts(
+            &cal.r_xy_center,
+            &mut cal_data.rx_center,
+            &mut cal_data.ry_center,
+        );
+        util::unpack_shorts(&cal.l_xy_min, &mut cal_data.lx_min, &mut cal_data.ly_min);
+        util::unpack_shorts(&cal.r_xy_min, &mut cal_data.rx_min, &mut cal_data.ry_min);
+
+        util::unpack_shorts(&cal.l_xy_max, &mut cal_data.lx_max, &mut cal_data.ly_max);
+        util::unpack_shorts(&cal.r_xy_max, &mut cal_data.rx_max, &mut cal_data.ry_max);
+        if cal_data.lx_min == CAL_BOGUS_VALUE && cal_data.ly_max == CAL_BOGUS_VALUE {
+            cal_data.lx_min = CAL_DEFAULT_MIN;
+            cal_data.lx_max = CAL_DEFAULT_MAX;
+            cal_data.lx_center = CAL_DEFAULT_CENTER;
+            cal_data.ly_min = CAL_DEFAULT_MIN;
+            cal_data.ly_max = CAL_DEFAULT_MAX;
+            cal_data.ly_center = CAL_DEFAULT_CENTER;
+        } else {
+            cal_data.lx_min = cal_data.lx_center - cal_data.lx_min;
+            cal_data.lx_max = cal_data.lx_center + cal_data.lx_max;
+            cal_data.ly_min = cal_data.ly_center - cal_data.ly_min;
+            cal_data.ly_max = cal_data.ly_center + cal_data.ly_max;
+        }
+
+        if cal_data.rx_min == CAL_BOGUS_VALUE && cal_data.ry_max == CAL_BOGUS_VALUE {
+            cal_data.rx_min = CAL_DEFAULT_MIN;
+            cal_data.rx_max = CAL_DEFAULT_MAX;
+            cal_data.rx_center = CAL_DEFAULT_CENTER;
+            cal_data.ry_min = CAL_DEFAULT_MIN;
+            cal_data.ry_max = CAL_DEFAULT_MAX;
+            cal_data.ry_center = CAL_DEFAULT_CENTER;
+        } else {
+            cal_data.rx_min = cal_data.rx_center - cal_data.rx_min;
+            cal_data.rx_max = cal_data.rx_center + cal_data.rx_max;
+            cal_data.ry_min = cal_data.ry_center - cal_data.ry_min;
+            cal_data.ry_max = cal_data.ry_center + cal_data.ry_max;
+        }
+    }
+
+    fn update_stick_params_calibration_data(
+        cal: &AnalogStickParamsCalibrationPacket,
+        cal_data: &mut CalibrationData,
+    ) {
+        util::unpack_shorts(
+            &cal.params,
+            &mut cal_data.dead_zone,
+            &mut cal_data.range_ratio,
+        );
+        if cal_data.dead_zone == CAL_BOGUS_VALUE {
+            cal_data.dead_zone = CAL_DEFAULT_DEADZONE;
+        }
+    }
+
+    fn read_data_and_fill(
+        device: &HidDevice,
+        gamepad: &mut Gamepad,
+        cal_data: &mut CalibrationData,
+        buf: &mut [u8],
+    ) {
         let len = device.read(buf).unwrap();
 
         //println!("raw len: {}", len);
@@ -160,52 +388,40 @@ impl GamepadAPI {
             let hex_string: String = buf.iter().map(|byte| format!("0x{:02x} ", byte)).collect();
             //println!("raw: {}", hex_string);
 
-            match InputReportID::try_from_u8(buf[0]) {
-                Some(InputReportID::FullControllerState) => {
+            match InputReportID::try_from(buf[0]) {
+                Ok(InputReportID::FullControllerState) => {
                     let report = ControllerStatePacket::read_from_prefix(&buf[1..]).unwrap();
-                    let button_values = util::extract_bits(&report.button_status, 3);
-
-                    for i in 0..24 {
-                        gamepad.buttons[i].pressed = button_values[i] > 0;
-                        gamepad.buttons[i].value = button_values[i] as f32;
-                    }
-
-                    let left_x: u32 = ((report.left_stick[1] & 0x0F) as u32) << 4
-                        | (report.left_stick[1] as u32) >> 4;
-                    let left_y: u32 = report.left_stick[2] as u32;
-
-                    let right_x: u32 = ((report.right_stick[1] & 0x0F) as u32) << 4
-                        | (report.right_stick[1] as u32) >> 4;
-                    let right_y: u32 = report.right_stick[2] as u32;
-
-                    gamepad.axes[0] = to_axis(left_x);
-                    gamepad.axes[1] = to_axis(left_y);
-                    gamepad.axes[2] = to_axis(right_x);
-                    gamepad.axes[3] = to_axis(right_y);
+                    Self::update_gamepad(&report.simple_state, &cal_data, gamepad);
                 }
-                Some(InputReportID::SimpleControllerState) => {
-                    let report = SimpleControllerStatePacket::read_from_prefix(&buf[1..]).unwrap();
-
-                    let button_values = util::extract_bits(&report.button_status, 3);
-                    for i in 0..24 {
-                        gamepad.buttons[i].pressed = button_values[i] > 0;
-                        gamepad.buttons[i].value = button_values[i] as f32;
+                Ok(InputReportID::SimpleControllerState) => {
+                    let state = SimpleControllerStatePacket::read_from_prefix(&buf[1..]).unwrap();
+                    Self::update_gamepad(&state, &cal_data, gamepad);
+                }
+                Ok(InputReportID::SubcommandReply) => {
+                    let pack = SubcommandInputPacket::read_from_prefix(&buf[1..]).unwrap();
+                    Self::update_gamepad(&pack.controller_state.simple_state, &cal_data, gamepad);
+                    match SubcommandID::try_from(pack.subcommand_id) {
+                        Ok(SubcommandID::SPIFlashRead) => {
+                            match SPIAddress::try_from(pack.address) {
+                                Ok(SPIAddress::AnalogStickCalibration) => {
+                                    let cal = AnalogStickCalibrationPacket::read_from_prefix(
+                                        &pack.subcommand_data,
+                                    )
+                                    .unwrap();
+                                    Self::update_stick_calibration_data(&cal, cal_data);
+                                }
+                                Ok(SPIAddress::AnalogStickParameters) => {
+                                    let cal = AnalogStickParamsCalibrationPacket::read_from_prefix(
+                                        &pack.subcommand_data,
+                                    )
+                                    .unwrap();
+                                    Self::update_stick_params_calibration_data(&cal, cal_data);
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
                     }
-
-                    let left_x: u32 =
-                        (report.left_stick[0] as u32) << 4 | (report.left_stick[1] as u32) >> 4;
-                    let left_y: u32 =
-                        ((report.left_stick[1] as u32) & 0x0F) << 8 | report.left_stick[2] as u32;
-
-                    let right_x: u32 =
-                        (report.right_stick[0] as u32) << 4 | (report.right_stick[1] as u32) >> 4;
-                    let right_y: u32 =
-                        ((report.right_stick[1] as u32) & 0x0F) << 8 | report.right_stick[2] as u32;
-
-                    gamepad.axes[0] = to_axis(left_x);
-                    gamepad.axes[1] = to_axis(left_y);
-                    gamepad.axes[2] = to_axis(right_x);
-                    gamepad.axes[3] = to_axis(right_y);
                 }
                 _ => {}
             }
@@ -234,18 +450,18 @@ impl GamepadAPI {
 
             live_sns.insert(sn);
 
-            let (index, device) = device_map.entry(sn.to_string()).or_insert_with(|| {
+            let (index, device, cal_data) = device_map.entry(sn.to_string()).or_insert_with(|| {
                 let device = hidapi
                     .open_serial(device_info.vendor_id(), device_info.product_id(), sn)
                     .unwrap();
-
-                (util::generate_id(), device)
+                (util::generate_id(), device, CalibrationData::default())
             });
 
             let mut gamepad = Gamepad::default();
 
             gamepad.index = *index;
-            Self::read_data_and_fill(&device, &mut gamepad, input_buf);
+
+            Self::read_data_and_fill(&device, &mut gamepad, cal_data, input_buf);
 
             gamepads.push(gamepad);
         }

@@ -6,4 +6,4 @@ edition = "2021"
 [dependencies]
 hidapi = "2.6.1"
 zerocopy = { version = "0.7.35", features = ["derive"]}
-#zerocopy-derive="0.7.35"
+num_enum = "0.7.3" 
