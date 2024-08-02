@@ -1,6 +1,8 @@
+use core::str;
 /**
  * port form:
  *  https://source.chromium.org/chromium/chromium/src/+/main:device/gamepad/nintendo_controller.cc;bpv=0;bpt=1
+ *  https://github.com/libsdl-org/SDL/blob/efefc4a1f35812007663f4afccd7bae68496238f/src/joystick/hidapi/SDL_hidapi_switch.c#L87
  */
 use hidapi::{HidApi, HidDevice};
 use num_enum::TryFromPrimitive;
@@ -120,13 +122,13 @@ struct SubcommandInputPacket {
     address: u16,
     padding: [u8; 2], // 0x00 0x00
     length: u8,
-    subcommand_data: [u8; 32],
+    subcommand_data: [u8; 18],
 }
 
 const REPORT_BUF_SIZE: usize = 48;
 
 #[repr(C)]
-#[derive(FromBytes, FromZeroes, Default)]
+#[derive(FromBytes, FromZeroes, Default, Debug)]
 struct AnalogStickCalibrationPacket {
     // Analog stick calibration data.
     l_xy_max: [u8; 3],
@@ -138,7 +140,7 @@ struct AnalogStickCalibrationPacket {
     r_xy_max: [u8; 3],
 }
 #[repr(C)]
-#[derive(FromBytes, FromZeroes, Default)]
+#[derive(FromBytes, FromZeroes, Default, Debug)]
 struct AnalogStickParamsCalibrationPacket {
     // Analog stick parameters
     padding: [u8; 3],
@@ -147,6 +149,7 @@ struct AnalogStickParamsCalibrationPacket {
     params: [u8; 3],
 }
 
+#[derive(Debug)]
 struct CalibrationData {
     // Analog stick calibration data.
     lx_center: u16,
@@ -222,6 +225,24 @@ impl Default for CalibrationData {
     }
 }
 
+#[repr(C)]
+#[derive(FromBytes, FromZeroes, AsBytes, Default)]
+struct SubcommandOutputPacket {
+    report_id: u8,
+    report_counter: u8,
+    rumble_data: [u8; 8],
+    subcommand_id: u8,
+    subcommand_data: [u8; 32], // 38
+}
+
+#[repr(C)]
+#[derive(FromBytes, FromZeroes, AsBytes, Default)]
+struct ReadSpiPacket {
+    address: u16,
+    padding: u16,
+    length: u16,
+}
+
 #[derive(Debug, Default)]
 pub struct Gamepad {
     pub index: usize,
@@ -235,10 +256,29 @@ pub struct Button {
     pub value: f32,
 }
 
+#[derive(Debug, Default)]
+struct GamepadContext {
+    cal_data: CalibrationData,
+    init_state: GamepadInitState,
+}
+
+#[derive(Debug, Default, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
+enum GamepadInitState {
+    #[default]
+    Uninitialized = 0,
+    RequestedAnalogCalibration = 1,
+    RequestedAnalogCalibrationOk = 2,
+    RequestedAnalogParams = 3,
+    RequestedAnalogParamsOk = 4,
+    Initialized = 5,
+}
+
 pub struct GamepadAPI {
     hidapi: HidApi,
-    device_map: HashMap<String, (usize, HidDevice, CalibrationData)>,
+    device_map: HashMap<String, (usize, HidDevice, GamepadContext)>,
     input_buf: [u8; REPORT_BUF_SIZE],
+    report_counter: u8,
 }
 
 impl GamepadAPI {
@@ -248,11 +288,51 @@ impl GamepadAPI {
             hidapi,
             device_map: HashMap::new(),
             input_buf: [0; REPORT_BUF_SIZE],
+            report_counter: 0,
         }
     }
 
-    fn send_subcommand(device: &HidDevice, commandId: SubcommandID, buf: &[u8], len: usize) {
-        //
+    fn send_subcommand(
+        report_counter: &mut u8,
+        device: &HidDevice,
+        command_id: SubcommandID,
+        buf: &[u8],
+    ) {
+        let mut packet = SubcommandOutputPacket::default();
+        packet.report_id = OutputReportID::RumbleAndSubcommand as u8;
+        packet.subcommand_id = command_id as u8;
+        *report_counter = (*report_counter + 1) & 0xF;
+        packet.report_counter = *report_counter;
+        packet.subcommand_data[..buf.len()].copy_from_slice(buf);
+        device.write(&packet.as_bytes()).unwrap();
+    }
+
+    fn request_analog_calibration(report_counter: &mut u8, device: &HidDevice) {
+        let packet = ReadSpiPacket {
+            address: SPIAddress::AnalogStickCalibration as u16,
+            padding: 0_u16,
+            length: 18_u16,
+        };
+        Self::send_subcommand(
+            report_counter,
+            device,
+            SubcommandID::SPIFlashRead,
+            packet.as_bytes(),
+        );
+    }
+
+    fn request_analog_params(report_counter: &mut u8, device: &HidDevice) {
+        let packet = ReadSpiPacket {
+            address: SPIAddress::AnalogStickParameters as u16,
+            padding: 0_u16,
+            length: 18_u16,
+        };
+        Self::send_subcommand(
+            report_counter,
+            device,
+            SubcommandID::SPIFlashRead,
+            packet.as_bytes(),
+        );
     }
 
     fn update_gamepad(
@@ -378,16 +458,12 @@ impl GamepadAPI {
         device: &HidDevice,
         gamepad: &mut Gamepad,
         cal_data: &mut CalibrationData,
+        init_state: &mut GamepadInitState,
         buf: &mut [u8],
     ) {
         let len = device.read(buf).unwrap();
 
-        //println!("raw len: {}", len);
-
         if len >= 12 {
-            let hex_string: String = buf.iter().map(|byte| format!("0x{:02x} ", byte)).collect();
-            //println!("raw: {}", hex_string);
-
             match InputReportID::try_from(buf[0]) {
                 Ok(InputReportID::FullControllerState) => {
                     let report = ControllerStatePacket::read_from_prefix(&buf[1..]).unwrap();
@@ -408,7 +484,10 @@ impl GamepadAPI {
                                         &pack.subcommand_data,
                                     )
                                     .unwrap();
+
                                     Self::update_stick_calibration_data(&cal, cal_data);
+
+                                    *init_state = GamepadInitState::RequestedAnalogCalibrationOk;
                                 }
                                 Ok(SPIAddress::AnalogStickParameters) => {
                                     let cal = AnalogStickParamsCalibrationPacket::read_from_prefix(
@@ -416,6 +495,8 @@ impl GamepadAPI {
                                     )
                                     .unwrap();
                                     Self::update_stick_params_calibration_data(&cal, cal_data);
+
+                                    *init_state = GamepadInitState::RequestedAnalogParamsOk;
                                 }
                                 _ => {}
                             }
@@ -433,6 +514,7 @@ impl GamepadAPI {
             input_buf,
             device_map,
             hidapi,
+            report_counter,
         } = self;
 
         hidapi.reset_devices().unwrap();
@@ -450,18 +532,38 @@ impl GamepadAPI {
 
             live_sns.insert(sn);
 
-            let (index, device, cal_data) = device_map.entry(sn.to_string()).or_insert_with(|| {
+            let (index, device, context) = device_map.entry(sn.to_string()).or_insert_with(|| {
                 let device = hidapi
                     .open_serial(device_info.vendor_id(), device_info.product_id(), sn)
                     .unwrap();
-                (util::generate_id(), device, CalibrationData::default())
+                (util::generate_id(), device, GamepadContext::default())
             });
+
+            let GamepadContext {
+                cal_data,
+                init_state,
+            } = context;
 
             let mut gamepad = Gamepad::default();
 
             gamepad.index = *index;
 
-            Self::read_data_and_fill(&device, &mut gamepad, cal_data, input_buf);
+            Self::read_data_and_fill(&device, &mut gamepad, cal_data, init_state, input_buf);
+
+            match GamepadInitState::try_from(*init_state) {
+                Ok(GamepadInitState::Uninitialized) => {
+                    Self::request_analog_calibration(report_counter, &device);
+                    context.init_state = GamepadInitState::RequestedAnalogCalibration;
+                }
+                Ok(GamepadInitState::RequestedAnalogCalibrationOk) => {
+                    Self::request_analog_params(report_counter, &device);
+                    context.init_state = GamepadInitState::RequestedAnalogParams;
+                }
+                Ok(GamepadInitState::RequestedAnalogParamsOk) => {
+                    context.init_state = GamepadInitState::Initialized;
+                }
+                _ => {}
+            }
 
             gamepads.push(gamepad);
         }

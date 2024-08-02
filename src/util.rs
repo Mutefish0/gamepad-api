@@ -28,9 +28,18 @@ pub fn unpack_shorts(buf: &[u8], v1: &mut u16, v2: &mut u16) {
 }
 
 pub fn is_dead_zone(x: u16, y: u16, x_center: u16, y_center: u16, dead_zone: u16) -> bool {
-    let dx = x - x_center;
-    let dy = y - y_center;
-    if dx * dx + dy * dy < dead_zone * dead_zone {
+    let dx = if x > x_center {
+        x - x_center
+    } else {
+        x_center - x
+    } as i32;
+    let dy = if y > y_center {
+        y - y_center
+    } else {
+        y_center - y
+    } as i32;
+
+    if dx * dx + dy * dy < (dead_zone * dead_zone) as i32 {
         return true;
     }
     false
