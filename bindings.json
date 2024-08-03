@@ -1,0 +1,1 @@
+{"name":"","littleEndian":false,"symbols":{},"typeDefs":{"Button":{"pressed":"bool","value":"f32"},"Input":{"b":"i32","a":"i32"}},"tsTypes":{"Input":"export type Input = {\n    a: number;\n  b: number;\n};","Button":"export type Button = {\n    pressed: boolean;\n  value: number;\n};"}}
