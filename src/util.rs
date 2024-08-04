@@ -55,3 +55,12 @@ pub fn clamp_axis(value: u16, min: u16, max: u16) -> f32 {
         return 2.0 * (value - min) as f32 / (max - min) as f32 - 1.0;
     }
 }
+
+pub fn to_hex_string(data: &[u8]) -> String {
+    let mut hex_string = String::with_capacity(data.len() * 2);
+    for byte in data {
+        // Format each byte as two hexadecimal characters
+        hex_string.push_str(&format!("{:02x} ", byte));
+    }
+    hex_string
+}

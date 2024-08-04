@@ -97,7 +97,7 @@ struct IMUData {
 
 #[repr(C)]
 #[derive(FromBytes, FromZeroes, Default)]
-struct SimpleControllerStatePacket {
+struct ControllerStatePacket {
     button_status: [u8; 3],
     left_stick: [u8; 3],
     right_stick: [u8; 3],
@@ -105,17 +105,25 @@ struct SimpleControllerStatePacket {
 
 #[repr(C)]
 #[derive(FromBytes, FromZeroes, Default)]
-struct ControllerStatePacket {
+struct SimpleControllerStatePacket {
+    button_status: [u8; 3],
+    left_stick: [u8; 4],
+    right_stick: [u8; 4],
+}
+
+#[repr(C)]
+#[derive(FromBytes, FromZeroes, Default)]
+struct ControllerStateInfoPacket {
     counter: u8,
     battery_and_connection: u8, /* battery and connection info */
-    simple_state: SimpleControllerStatePacket,
+    controller_state: ControllerStatePacket,
     vibration_code: u8,
 }
 
 #[repr(C)]
 #[derive(FromBytes, FromZeroes, Default)]
 struct SubcommandInputPacket {
-    controller_state: ControllerStatePacket,
+    controller_state_info: ControllerStateInfoPacket,
     subcommand_ack: u8,
     subcommand_id: u8,
     address: u16,
@@ -344,11 +352,14 @@ impl GamepadAPI {
     }
 
     fn update_gamepad(
-        state: &SimpleControllerStatePacket,
+        button_status: &[u8],
+        left_stick: &[u8],
+        right_stick: &[u8],
         cal_data: &CalibrationData,
         gamepad: &mut Gamepad,
+        is_simple: bool,
     ) {
-        let button_values = util::extract_bits(&state.button_status, 3);
+        let button_values = util::extract_bits(button_status, 3);
         for i in 0..24 {
             gamepad.buttons[i].pressed = button_values[i] > 0;
             gamepad.buttons[i].value = button_values[i] as f32;
@@ -359,8 +370,15 @@ impl GamepadAPI {
         let mut rx: u16 = 0;
         let mut ry: u16 = 0;
 
-        util::unpack_shorts(&state.left_stick, &mut lx, &mut ly);
-        util::unpack_shorts(&state.right_stick, &mut rx, &mut ry);
+        if is_simple {
+            lx = (left_stick[1] as u16) << 4;
+            ly = (left_stick[3] as u16) << 4;
+            rx = (right_stick[1] as u16) << 4;
+            ry = (right_stick[3] as u16) << 4;
+        } else {
+            util::unpack_shorts(left_stick, &mut lx, &mut ly);
+            util::unpack_shorts(right_stick, &mut rx, &mut ry);
+        }
 
         let is_left_deadzone = util::is_dead_zone(
             lx,
@@ -474,16 +492,37 @@ impl GamepadAPI {
         if len >= 12 {
             match InputReportID::try_from(buf[0]) {
                 Ok(InputReportID::FullControllerState) => {
-                    let report = ControllerStatePacket::read_from_prefix(&buf[1..]).unwrap();
-                    Self::update_gamepad(&report.simple_state, &cal_data, gamepad);
+                    let info = ControllerStateInfoPacket::read_from_prefix(&buf[1..]).unwrap();
+                    Self::update_gamepad(
+                        &info.controller_state.button_status,
+                        &info.controller_state.left_stick,
+                        &info.controller_state.right_stick,
+                        &cal_data,
+                        gamepad,
+                        false,
+                    );
                 }
                 Ok(InputReportID::SimpleControllerState) => {
                     let state = SimpleControllerStatePacket::read_from_prefix(&buf[1..]).unwrap();
-                    Self::update_gamepad(&state, &cal_data, gamepad);
+                    Self::update_gamepad(
+                        &state.button_status,
+                        &state.left_stick,
+                        &state.right_stick,
+                        &cal_data,
+                        gamepad,
+                        true,
+                    );
                 }
                 Ok(InputReportID::SubcommandReply) => {
                     let pack = SubcommandInputPacket::read_from_prefix(&buf[1..]).unwrap();
-                    Self::update_gamepad(&pack.controller_state.simple_state, &cal_data, gamepad);
+                    Self::update_gamepad(
+                        &pack.controller_state_info.controller_state.button_status,
+                        &pack.controller_state_info.controller_state.left_stick,
+                        &pack.controller_state_info.controller_state.right_stick,
+                        &cal_data,
+                        gamepad,
+                        false,
+                    );
                     match SubcommandID::try_from(pack.subcommand_id) {
                         Ok(SubcommandID::SPIFlashRead) => {
                             match SPIAddress::try_from(pack.address) {

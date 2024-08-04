@@ -3,7 +3,8 @@
   "packages": {
     "specifiers": {
       "jsr:@std/cli": "jsr:@std/cli@1.0.2",
-      "jsr:@std/encoding": "jsr:@std/encoding@1.0.1"
+      "jsr:@std/encoding": "jsr:@std/encoding@1.0.1",
+      "jsr:@std/encoding@1": "jsr:@std/encoding@1.0.1"
     },
     "jsr": {
       "@std/cli@1.0.2": {
