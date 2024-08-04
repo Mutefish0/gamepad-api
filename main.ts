@@ -1,9 +1,9 @@
-import "./mod.ts";
+import { getGamepads } from "./mod.ts";
 
 async function main() {
   while (true) {
-    // @ts-ignore
-    console.log(navigator.getGamepads());
+    const gamepads = getGamepads();
+    console.log(gamepads);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }

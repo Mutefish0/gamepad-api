@@ -14,20 +14,17 @@ for (const target of targets) {
     stdout: "inherit",
     stderr: "inherit",
   });
-
   const filename = target.includes("windows")
     ? "gamepad_api.dll"
     : target.includes("darwin")
     ? "libgamepad_api.dylib"
     : "libgamepad_api.so";
-
   const { code } = command.outputSync();
-
   if (code === 0) {
     const buf = Deno.readFileSync(`./target/${target}/release/${filename}`);
     const b64 = encodeBase64(buf);
     const code = `
-      import { decodeBase64 } from "jsr:@std/encoding";
+      import { decodeBase64 } from "jsr:@std/encoding@1";
       export default decodeBase64("${b64}");
     `;
     Deno.writeTextFileSync(`./libs/${target}.ts`, code);

@@ -9,7 +9,7 @@ interface Gamepad {
 
 const __ptr_gamepad_api__ = ffi.symbols.gamepad_api_new();
 
-function getGamepads() {
+function getGamepads(): Gamepad[] {
   const bufPtr = ffi.symbols.get_gamepads(__ptr_gamepad_api__);
 
   const view = new DataView(bufPtr.buffer);
@@ -45,7 +45,5 @@ function getGamepads() {
 
   return gamepads;
 }
-
-(navigator as any).getGamepads = getGamepads;
 
 export { getGamepads };
