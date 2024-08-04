@@ -57,13 +57,3 @@ function getGamepads() {
 }
 
 (navigator as any).getGamepads = getGamepads;
-
-async function main() {
-  while (1) {
-    const gamepads = (navigator as any).getGamepads();
-    console.log(gamepads);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-}
-
-main();
