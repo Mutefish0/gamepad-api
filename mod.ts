@@ -1,14 +1,4 @@
-const lib = Deno.dlopen("./target/release/libgamepad_api.dylib", {
-  gamepad_api_new: { parameters: [], result: "pointer" },
-  get_gamepads: {
-    parameters: ["pointer"],
-    result: { struct: ["usize", "pointer"] },
-  },
-  free_gamepad_array: {
-    parameters: [{ struct: ["usize", "pointer"] }],
-    result: "void",
-  },
-});
+import ffi from "./ffi.ts";
 
 // TypeScript interfaces for Rust structs
 interface Gamepad {
@@ -17,10 +7,10 @@ interface Gamepad {
   buttons: Array<{ pressed: boolean; value: number }>;
 }
 
-const __ptr_gamepad_api__ = lib.symbols.gamepad_api_new();
+const __ptr_gamepad_api__ = ffi.symbols.gamepad_api_new();
 
 function getGamepads() {
-  const bufPtr = lib.symbols.get_gamepads(__ptr_gamepad_api__);
+  const bufPtr = ffi.symbols.get_gamepads(__ptr_gamepad_api__);
 
   const view = new DataView(bufPtr.buffer);
 
@@ -51,9 +41,11 @@ function getGamepads() {
     gamepads.push({ index: Number(index), axes, buttons });
   }
 
-  lib.symbols.free_gamepad_array(bufPtr!);
+  ffi.symbols.free_gamepad_array(bufPtr!);
 
   return gamepads;
 }
 
 (navigator as any).getGamepads = getGamepads;
+
+export { getGamepads };
